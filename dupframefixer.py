@@ -372,7 +372,15 @@ def main() -> int:
     parser.add_argument("--yes", action="store_true", help="Delete duplicates without prompting")
     parser.add_argument("--keep-tiff", action="store_true", help="Keep temporary TIFF folder")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except SystemExit as e:
+        # If user asked for help, allow normal exit
+        if getattr(e, "code", None) == 0:
+            raise
+        # For missing/invalid args, print a friendly message and exit gracefully
+        print("Error: Missing or invalid arguments. Use --help for usage.")
+        return 2
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -473,7 +481,14 @@ def infer_prefix(filename: str) -> str:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        rc = main()
     except DupFrameFixerError as exc:
         print(f"Error: {exc}")
-        sys.exit(1)
+        rc = 1
+    except Exception as exc:  # pragma: no cover - unexpected
+        LOGGER.exception("Unhandled exception")
+        print(f"Error: {exc}")
+        rc = 1
+    # Use os._exit to terminate without a visible SystemExit exception in some debuggers
+    import os
+    os._exit(rc if isinstance(rc, int) else 0)
