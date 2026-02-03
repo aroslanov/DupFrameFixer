@@ -59,6 +59,8 @@ IMAGE_EXTENSIONS = {
     ".exr",
 }
 
+META_FILENAME = "dupframefixer_meta.json"
+
 
 @dataclass
 class VideoInfo:
@@ -168,6 +170,37 @@ def ensure_empty_dir(path: Path) -> None:
         shutil.rmtree(path)
     LOGGER.debug("Creating directory: %s", path)
     path.mkdir(parents=True, exist_ok=True)
+
+
+def load_meta(tiff_dir: Path) -> dict:
+    meta_path = tiff_dir / META_FILENAME
+    if not meta_path.exists():
+        return {}
+    try:
+        with meta_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        LOGGER.warning("Failed to read metadata: %s", meta_path)
+        return {}
+
+
+def save_meta(tiff_dir: Path, meta: dict) -> None:
+    meta_path = tiff_dir / META_FILENAME
+    try:
+        with meta_path.open("w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+    except OSError:
+        LOGGER.warning("Failed to write metadata: %s", meta_path)
+
+
+def infer_digits_from_images(images: List[Path]) -> int:
+    digit_lengths = [len(m[-1]) for m in (re.findall(r"\d+", p.stem) for p in images) if m]
+    return max(digit_lengths) if digit_lengths else 6
+
+
+def infer_digits_from_tiffs(tiff_files: List[Path]) -> int:
+    digit_lengths = [len(m[-1]) for m in (re.findall(r"\d+", p.stem) for p in tiff_files) if m]
+    return max(digit_lengths) if digit_lengths else 6
 
 
 def extract_video_to_tiff(video_path: Path, tiff_dir: Path, pix_fmt: Optional[str]) -> None:
@@ -326,6 +359,93 @@ def parse_frame_rate(rate_str: Optional[str]) -> Optional[str]:
     return rate_str
 
 
+def _sanitize_level(level: Optional[str]) -> Optional[str]:
+    if not level:
+        return None
+    try:
+        level_int = int(level)
+    except (TypeError, ValueError):
+        return None
+    return str(level_int) if level_int > 0 else None
+
+
+def _sanitize_bit_rate(codec_name: Optional[str], bit_rate: Optional[str]) -> Optional[str]:
+    if not bit_rate:
+        return None
+    if codec_name and "prores" in codec_name.lower():
+        return None
+    try:
+        br = int(bit_rate)
+    except (TypeError, ValueError):
+        return None
+    return str(br) if br > 0 else None
+
+
+def _sanitize_pix_fmt(codec_name: Optional[str], pix_fmt: Optional[str]) -> Optional[str]:
+    if not pix_fmt:
+        return None
+    if codec_name and "prores" in codec_name.lower():
+        allowed = {"yuv422p10le", "yuv444p10le", "yuva444p10le"}
+        return pix_fmt if pix_fmt in allowed else None
+    return pix_fmt
+
+
+def _sanitize_profile(codec_name: Optional[str], profile: Optional[str]) -> Optional[str]:
+    if not profile or not codec_name:
+        return None
+    codec = codec_name.lower()
+    prof = profile.strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+
+    if "prores" in codec:
+        mapping = {
+            "apco": "0",
+            "proxy": "0",
+            "0": "0",
+            "apcs": "1",
+            "lt": "1",
+            "1": "1",
+            "apcn": "2",
+            "standard": "2",
+            "422": "2",
+            "2": "2",
+            "apch": "3",
+            "hq": "3",
+            "422hq": "3",
+            "3": "3",
+            "ap4h": "4",
+            "4444": "4",
+            "4": "4",
+            "ap4x": "5",
+            "4444xq": "5",
+            "xq": "5",
+            "5": "5",
+        }
+        return mapping.get(prof)
+
+    if codec in {"h264", "libx264"}:
+        mapping = {
+            "baseline": "baseline",
+            "main": "main",
+            "high": "high",
+            "high10": "high10",
+            "high422": "high422",
+            "high444": "high444",
+            "constrainedbaseline": "constrained_baseline",
+            "constrainedhigh": "constrained_high",
+        }
+        return mapping.get(prof)
+
+    if codec in {"hevc", "h265", "libx265"}:
+        mapping = {
+            "main": "main",
+            "main10": "main10",
+            "mainstillpicture": "mainstillpicture",
+        }
+        return mapping.get(prof)
+
+    return None
+
+
 def reencode_video_from_tiff(
     tiff_dir: Path,
     output_video: Path,
@@ -343,14 +463,22 @@ def reencode_video_from_tiff(
         cmd += ["-i", str(audio_path)]
     if info.codec_name:
         cmd += ["-c:v", info.codec_name]
-    if info.pix_fmt:
-        cmd += ["-pix_fmt", info.pix_fmt]
-    if info.bit_rate:
-        cmd += ["-b:v", info.bit_rate]
-    if info.profile:
-        cmd += ["-profile:v", info.profile]
-    if info.level:
-        cmd += ["-level", info.level]
+
+    pix_fmt = _sanitize_pix_fmt(info.codec_name, info.pix_fmt)
+    if pix_fmt:
+        cmd += ["-pix_fmt", pix_fmt]
+
+    bit_rate = _sanitize_bit_rate(info.codec_name, info.bit_rate)
+    if bit_rate:
+        cmd += ["-b:v", bit_rate]
+
+    profile = _sanitize_profile(info.codec_name, info.profile)
+    if profile:
+        cmd += ["-profile:v", profile]
+
+    level = _sanitize_level(info.level)
+    if level:
+        cmd += ["-level", level]
     if info.color_space:
         cmd += ["-colorspace", info.color_space]
     if info.color_transfer:
@@ -370,7 +498,7 @@ def main() -> int:
     parser.add_argument("input", help="Input video file or image sequence folder")
     parser.add_argument("--threshold", type=float, default=99.5, help="Similarity threshold percent (0-100). Default: 99.5")
     parser.add_argument("--yes", action="store_true", help="Delete duplicates without prompting")
-    parser.add_argument("--keep-tiff", action="store_true", help="Keep temporary TIFF folder")
+    parser.add_argument("--remove-temp", action="store_true", help="Delete temporary TIFF folder after processing")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     try:
         args = parser.parse_args()
@@ -409,6 +537,17 @@ def main() -> int:
     tiff_dir = temp_parent / temp_name
     LOGGER.info("Temporary TIFF folder: %s", tiff_dir)
 
+    resume_existing = False
+    meta = {}
+    if tiff_dir.exists():
+        existing_tiffs = sorted(tiff_dir.glob("*.tiff"), key=natural_sort_key)
+        if existing_tiffs:
+            resume_existing = True
+            meta = load_meta(tiff_dir)
+            LOGGER.info("Resuming from existing TIFF folder (preserving intermediates).")
+        else:
+            ensure_empty_dir(tiff_dir)
+
     input_ext = None
     digits = 6
     prefix = "frame_"
@@ -418,15 +557,36 @@ def main() -> int:
     if is_video:
         info_json = run_ffprobe_json(input_path)
         video_info = parse_video_info(info_json)
-        extract_video_to_tiff(input_path, tiff_dir, video_info.pix_fmt)
-        audio_path = extract_audio_if_present(input_path, tiff_dir, video_info.has_audio)
+        if not resume_existing:
+            extract_video_to_tiff(input_path, tiff_dir, video_info.pix_fmt)
+        audio_path = None
+        audio_candidate = tiff_dir / "audio.mka"
+        if audio_candidate.exists():
+            audio_path = audio_candidate
+        if not audio_path:
+            audio_path = extract_audio_if_present(input_path, tiff_dir, video_info.has_audio)
+        save_meta(tiff_dir, {
+            "is_video": True,
+            "audio_path": str(audio_path) if audio_path else None,
+        })
     else:
         images = list_images(input_path)
         if not images:
             raise DupFrameFixerError("No images found in the input folder.")
-        input_ext, digits = convert_images_to_tiff(images, tiff_dir)
-        prefix = infer_prefix(images[0].name)
+        if resume_existing:
+            input_ext = meta.get("input_ext") or images[0].suffix.lower().lstrip(".")
+            digits = int(meta.get("digits") or infer_digits_from_images(images))
+            prefix = meta.get("prefix") or infer_prefix(images[0].name)
+        else:
+            input_ext, digits = convert_images_to_tiff(images, tiff_dir)
+            prefix = infer_prefix(images[0].name)
         LOGGER.debug("Inferred output prefix: %s", prefix)
+        save_meta(tiff_dir, {
+            "is_video": False,
+            "input_ext": input_ext,
+            "digits": digits,
+            "prefix": prefix,
+        })
 
     tiff_files = sorted(tiff_dir.glob("*.tiff"), key=natural_sort_key)
     LOGGER.debug("TIFF frames loaded: %d", len(tiff_files))
@@ -464,7 +624,7 @@ def main() -> int:
     else:
         LOGGER.info("No duplicates found; skipping re-export.")
 
-    if not args.keep_tiff:
+    if args.remove_temp:
         LOGGER.info("Removing temporary TIFF folder: %s", tiff_dir)
         shutil.rmtree(tiff_dir, ignore_errors=True)
 
