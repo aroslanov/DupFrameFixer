@@ -295,9 +295,20 @@ def write_report(report_path: Path, matches: List[DuplicateMatch]) -> None:
             ])
 
 
-def prompt_confirm() -> bool:
-    response = input("Delete consecutive duplicates to trash? [y/N]: ").strip().lower()
-    return response == "y" or response == "yes"
+def print_duplicate_statistics(total_frames: int, duplicates: List[DuplicateMatch], threshold: float, report_path: Path) -> None:
+    duplicate_count = len(duplicates)
+    coverage = (duplicate_count / total_frames * 100) if total_frames else 0.0
+    print(f"Scanned {total_frames} frames (threshold {threshold:.2f}%).")
+    print(f"Found {duplicate_count} duplicate consecutive frames ({coverage:.2f}% of frames).")
+    print(f"Duplicate report: {report_path}")
+
+
+def prompt_process_output(default_yes: bool = True) -> bool:
+    prompt = "Process output file? [Y/n]: " if default_yes else "Process output file? [y/N]: "
+    response = input(prompt).strip().lower()
+    if not response:
+        return default_yes
+    return response in {"y", "yes"}
 
 
 def delete_to_trash(files: Iterable[Path]) -> None:
@@ -497,7 +508,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Remove consecutive duplicate frames from a video or image sequence.")
     parser.add_argument("input", help="Input video file or image sequence folder")
     parser.add_argument("--threshold", type=float, default=99.5, help="Similarity threshold percent (0-100). Default: 99.5")
-    parser.add_argument("--yes", action="store_true", help="Delete duplicates without prompting")
+    parser.add_argument("--yes", action="store_true", help="Process the output file without prompting (deletes duplicates automatically)")
     parser.add_argument("--remove-temp", action="store_true", help="Delete temporary TIFF folder after processing")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
     try:
@@ -594,34 +605,31 @@ def main() -> int:
 
     report_path = tiff_dir / "duplicate_report.csv"
     write_report(report_path, matches)
+    print_duplicate_statistics(len(tiff_files), matches, args.threshold, report_path)
 
     if matches:
-        print(f"Found {len(matches)} duplicate consecutive frames.")
-        print(f"Report: {report_path}")
-        if args.yes or prompt_confirm():
-            LOGGER.info("Deleting %d duplicates to trash.", len(matches))
+        should_process = args.yes or prompt_process_output()
+        if should_process:
+            LOGGER.info("Deleting %d duplicates.", len(matches))
             delete_to_trash(m.curr_file for m in matches)
             renumber_sequence(tiff_dir)
+            if is_video:
+                if not video_info:
+                    raise DupFrameFixerError("Missing video info for re-encode.")
+                output_video = input_path.with_name(f"{input_path.stem}_cleaned{input_path.suffix}")
+                reencode_video_from_tiff(tiff_dir, output_video, video_info, audio_path)
+                print(f"Output video: {output_video}")
+            else:
+                if not input_ext:
+                    raise DupFrameFixerError("Missing input image format.")
+                output_dir = input_path.parent / f"{input_path.name}_clean"
+                convert_tiff_to_output(tiff_dir, output_dir, input_ext, prefix, digits)
+                print(f"Output sequence: {output_dir}")
         else:
-            LOGGER.info("User declined deletion.")
-            print("No files were deleted.")
+            LOGGER.info("User declined output processing.")
+            print("Skipping output assembly; temporary TIFF folder remains intact.")
     else:
         print("No consecutive duplicates detected.")
-
-    if matches:
-        if is_video:
-            if not video_info:
-                raise DupFrameFixerError("Missing video info for re-encode.")
-            output_video = input_path.with_name(f"{input_path.stem}_cleaned{input_path.suffix}")
-            reencode_video_from_tiff(tiff_dir, output_video, video_info, audio_path)
-            print(f"Output video: {output_video}")
-        else:
-            if not input_ext:
-                raise DupFrameFixerError("Missing input image format.")
-            output_dir = input_path.parent / f"{input_path.name}_clean"
-            convert_tiff_to_output(tiff_dir, output_dir, input_ext, prefix, digits)
-            print(f"Output sequence: {output_dir}")
-    else:
         LOGGER.info("No duplicates found; skipping re-export.")
 
     if args.remove_temp:
