@@ -51,9 +51,10 @@ python dupframefixer.py path\to\sequence_folder
 ```
 
 ### Options
-- `--threshold 0-100` (default 99.5)
-- `--yes` auto-confirm deletion
-- `--keep-tiff` keep temporary TIFF folder
+- `--threshold 0-100` (default 99.5) — similarity threshold for detecting duplicates; 100 uses exact byte match, below 100 uses SSIM
+- `--yes` auto-confirm deletion and output processing
+- `--remove-temp` delete the temporary TIFF folder after processing
+- `--log-level DEBUG|INFO|WARNING|ERROR` (default INFO) — set logging verbosity
 
 ## Output
 - Video input: `*_cleaned.<ext>` next to the original file.
@@ -63,6 +64,8 @@ python dupframefixer.py path\to\sequence_folder
 ## Notes
 - Re-encoding uses best-effort settings (codec, pix_fmt, bitrate, profile, level, color tags). Exact bit-perfect matches are not guaranteed for lossy codecs.
 - For threshold 100%, exact byte match is used; below 100% uses SSIM (structural similarity).
+- Audio tracks are automatically extracted and re-muxed into the output video when present.
+- If a temporary TIFF folder already exists from a previous run, the tool resumes from it instead of re-extracting.
 ## License
 
 This project is licensed under the MIT License — see the [MIT License](https://opensource.org/licenses/MIT) for details.
